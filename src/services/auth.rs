@@ -1,14 +1,12 @@
 use poem::{
-    error::ResponseError,
     get, handler,
-    http::StatusCode,
     web::{Data, Query, Redirect},
-    IntoResponse, Route,
+    Route,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::pool;
 
-use crate::EnvironmentVariables;
+use crate::{util::error::HttpError, EnvironmentVariables};
 
 #[derive(Deserialize)]
 struct CallbackQuery {
@@ -23,31 +21,15 @@ struct AccessTokenRequest {
 }
 
 #[derive(Deserialize)]
-struct AccessTokenResponse {
-    access_token: String,
-    expires_in: i64,
-    refresh_token: String,
+pub struct AccessTokenResponse {
+    pub access_token: String,
+    pub expires_in: i64,
+    pub refresh_token: String,
 }
 
 #[derive(Deserialize)]
 struct UserProfileResponse {
     uri: String,
-}
-
-struct MyError;
-
-impl ResponseError for MyError {
-    fn status(&self) -> StatusCode {
-        StatusCode::INTERNAL_SERVER_ERROR
-    }
-}
-
-impl IntoResponse for MyError {
-    fn into_response(self) -> poem::Response {
-        poem::Response::builder()
-            .status(self.status())
-            .body("Internal Server Error")
-    }
 }
 
 #[handler]
@@ -66,7 +48,7 @@ async fn callback(
     Query(CallbackQuery { code }): Query<CallbackQuery>,
     env: Data<&EnvironmentVariables>,
     pool: Data<&pool::Pool<sqlx::MySql>>,
-) -> impl IntoResponse {
+) -> poem::Result<Redirect, HttpError> {
     let request_body = AccessTokenRequest {
         grant_type: "authorization_code".to_string(),
         code: code.clone(),
@@ -82,33 +64,17 @@ async fn callback(
         )
         .form(&request_body)
         .send()
-        .await;
+        .await?;
 
-    let response = match response {
-        Ok(response) => response,
-        Err(_) => return MyError.into_response(),
-    };
+    let token = response.json::<AccessTokenResponse>().await?;
 
-    let token = match response.json::<AccessTokenResponse>().await {
-        Ok(token) => token,
-        Err(_) => return MyError.into_response(),
-    };
-
-    let user_request = client
+    let user_response = client
         .get("https://api.spotify.com/v1/me")
         .bearer_auth(token.access_token.clone())
         .send()
-        .await;
-
-    let user_response = match user_request {
-        Ok(response) => response.json::<UserProfileResponse>().await,
-        Err(_) => return MyError.into_response(),
-    };
-
-    let user = match user_response {
-        Ok(user) => user,
-        Err(_) => return MyError.into_response(),
-    };
+        .await?
+        .json::<UserProfileResponse>()
+        .await?;
 
     let db_result = sqlx::query!(
         "INSERT INTO auth (access_token, expiry_date, refresh_token) VALUES (?, ?, ?)",
@@ -117,20 +83,18 @@ async fn callback(
         token.refresh_token
     )
     .execute(&**pool)
-    .await;
+    .await?;
 
-    match db_result {
-        Ok(res) => {
-            let _ = sqlx::query!("INSERT INTO user (username, auth_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE auth_id = ?",
-                user.uri,
-                res.last_insert_id(),
-                res.last_insert_id()
-            ).execute(&**pool).await;
+    let _ = sqlx::query!(
+        "INSERT INTO user (username, auth_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE auth_id = ?",
+        user_response.uri,
+        db_result.last_insert_id(),
+        db_result.last_insert_id()
+    )
+    .execute(&**pool)
+    .await?;
 
-            return Redirect::temporary(format!("/?uri={}", user.uri)).into_response();
-        }
-        Err(_) => return MyError.into_response(),
-    }
+    Ok(Redirect::temporary(format!("/?uri={}", user_response.uri)))
 }
 
 pub fn api() -> Route {

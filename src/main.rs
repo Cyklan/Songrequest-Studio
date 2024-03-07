@@ -1,7 +1,13 @@
+use std::env::current_exe;
+
 use dotenvy::dotenv;
-use poem::{http::Method, listener::TcpListener, middleware::Cors, EndpointExt, Route, Server};
+use poem::{
+    endpoint::StaticFilesEndpoint, get, http::Method, listener::TcpListener, middleware::Cors,
+    EndpointExt, Route, Server,
+};
 
 mod services;
+mod util;
 
 #[derive(serde::Deserialize, Clone)]
 pub struct EnvironmentVariables {
@@ -9,50 +15,42 @@ pub struct EnvironmentVariables {
     host_address: String,
     spotify_client_id: String,
     spotify_client_secret: String,
+    port: u16,
 }
-
 #[tokio::main]
-async fn main() -> Result<(), std::io::Error> {
+async fn main() -> color_eyre::Result<()> {
+    color_eyre::install()?;
     dotenv().ok();
 
-    let env = match envy::from_env::<EnvironmentVariables>() {
-        Ok(env) => env,
-        Err(e) => {
-            println!("Failed to load environment variables: {}", e);
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Failed to load environment variables",
-            ));
-        }
-    };
+    let mut path = current_exe()?;
+    path.pop();
+    path.push("public");
 
-    let pool = match sqlx::mysql::MySqlPoolOptions::new()
+    println!("{:?}", path);
+
+    let env = envy::from_env::<EnvironmentVariables>()?;
+    let pool = sqlx::mysql::MySqlPoolOptions::new()
         .max_connections(5)
         .connect(&env.database_url)
-        .await
-    {
-        Ok(pool) => pool,
-        Err(e) => {
-            println!("Failed to connect to database: {}", e);
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Failed to connect to database",
-            ));
-        }
-    };
+        .await?;
 
     let cors = Cors::new()
         .allow_method(Method::GET)
         .allow_origin_regex("*");
 
     let app = Route::new()
+        .nest(
+            "/",
+            get(StaticFilesEndpoint::new(path).index_file("index.html")),
+        )
         .nest("/auth", services::auth::api())
         .nest("/sse", services::sse::api())
         .data(pool)
-        .data(env)
+        .data(env.clone())
         .with(cors);
 
-    Server::new(TcpListener::bind("0.0.0.0:3000"))
+    Server::new(TcpListener::bind(format!("0.0.0.0:{}", env.port)))
         .run(app)
-        .await
+        .await?;
+    Ok(())
 }

@@ -1,7 +1,7 @@
 CREATE TABLE `auth` (
   `id` int(9) unsigned NOT NULL AUTO_INCREMENT,
   `access_token` varchar(255) NOT NULL,
-  `expiry_date` INT(11) NULL ,
+  `expiry_date` INT(11) NOT NULL ,
   `refresh_token` varchar(255) NOT NULL,
   PRIMARY KEY (`id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb3 COLLATE = utf8mb3_general_ci;
